@@ -17,7 +17,7 @@ const state = {
 
 const I18N = {
   zh: {
-    brand_sub: "ADK-Rust v2 自主智能体",
+    brand_sub: "自主智能体",
     tab_chat: "对话", tab_tasks: "任务", tab_audit: "审计日志", tab_settings: "设置",
     status_checking: "检测中", status_no_model: "模型未配置", status_offline: "服务离线",
     new_session: "＋ 新会话", session_hint: "会话",
@@ -57,7 +57,7 @@ const I18N = {
     skill_default_task: "（按技能说明执行）",
   },
   en: {
-    brand_sub: "Autonomous agent on ADK-Rust v2",
+    brand_sub: "Autonomous agent",
     tab_chat: "Chat", tab_tasks: "Tasks", tab_audit: "Audit Log", tab_settings: "Settings",
     status_checking: "Checking", status_no_model: "Model not configured", status_offline: "Service offline",
     new_session: "+ New session", session_hint: "Session",
@@ -942,6 +942,15 @@ $("#btn-lang").addEventListener("click", () => setLang(lang === "zh" ? "en" : "z
 applyI18n();
 
 (async function init() {
+  // 拉取版本号，拼接副标题
+  try {
+    const r = await fetch("/api/version");
+    if (r.ok) {
+      const d = await r.json();
+      const sub = $(".brand-sub");
+      if (sub) sub.textContent = t("brand_sub") + " v" + d.version;
+    }
+  } catch {}
   await loadSessions();
   if (state.sessionId) await renderHistory();
   loadTasks();

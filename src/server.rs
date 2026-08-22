@@ -58,6 +58,7 @@ pub fn router(state: AppState) -> Router {
         .route("/style.css", get(style_css))
         .route("/app.js", get(app_js))
         .route("/api/health", get(health))
+        .route("/api/version", get(version_info))
         .route("/api/chat", post(chat))
         .route("/api/chat/stop", post(chat_stop))
         .route("/api/events", get(events_stream))
@@ -90,6 +91,10 @@ async fn app_js() -> impl IntoResponse {
         [(header::CONTENT_TYPE, "application/javascript; charset=utf-8")],
         include_str!("../assets/app.js"),
     )
+}
+
+async fn version_info() -> Json<Value> {
+    Json(json!({ "version": env!("CARGO_PKG_VERSION") }))
 }
 
 async fn health(State(state): State<AppState>) -> Json<Value> {
