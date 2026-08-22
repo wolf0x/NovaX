@@ -371,7 +371,7 @@ async function sendChat() {
     const resp = await fetch("/api/chat", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ message, session_id: state.sessionId }),
+      body: JSON.stringify({ message, session_id: state.sessionId, lang }),
     });
     if (!resp.ok || !resp.body) {
       let msg = `${t("req_failed")} (${resp.status})`;

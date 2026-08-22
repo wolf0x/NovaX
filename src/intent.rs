@@ -94,14 +94,18 @@ async fn collect_text(
     Ok(text)
 }
 
-/// 从模型输出中提取并校验 JSON 判定（容忍代码块包裹与前后杂散文字）。
+/// 从模型输出中提取并校验 JSON 判定（容忍代码块包裹、前后杂散文字、
+/// 以及模型在 JSON 后追加额外内容/多输出一个 JSON 的情况——只取第一个完整对象）。
 fn parse_verdict(raw: &str) -> anyhow::Result<IntentVerdict> {
     let start = raw.find('{').ok_or_else(|| anyhow::anyhow!("模型未输出 JSON"))?;
-    let end = raw.rfind('}').ok_or_else(|| anyhow::anyhow!("模型未输出完整 JSON"))?;
-    if end <= start {
-        anyhow::bail!("模型输出的 JSON 不完整");
-    }
-    let mut verdict: IntentVerdict = serde_json::from_str(&raw[start..=end])?;
+    let slice = &raw[start..];
+    // 流式解析：只读取第一个完整 JSON 对象，忽略其后的任何多余字符（避免 "trailing characters"）
+    let deserializer = serde_json::Deserializer::from_str(slice);
+    let mut verdict = match deserializer.into_iter::<IntentVerdict>().next() {
+        Some(Ok(v)) => v,
+        Some(Err(e)) => return Err(anyhow::anyhow!("判定 JSON 解析失败: {e}")),
+        None => anyhow::bail!("模型输出的 JSON 不完整"),
+    };
     // 只保留合法能力名，防止提示注入引入未知能力绕过门禁
     verdict.capabilities.retain(|c| matches!(c.as_str(), "read" | "write" | "edit" | "delete"));
     verdict.capabilities.sort();
@@ -134,5 +138,18 @@ mod tests {
     fn parse_verdict_invalid() {
         assert!(parse_verdict("没有任何 JSON").is_err());
         assert!(parse_verdict("{\"capabilities\": ").is_err());
+    }
+
+    /// 模型在 JSON 后追加杂散文字或重复输出一个 JSON：只取第一个对象，不报 trailing characters。
+    #[test]
+    fn parse_verdict_trailing_content() {
+        let raw = "{\"capabilities\":[\"write\"],\"dangerous\":false,\"reason\":\"下载并写入 /tmp 文件\"} 补充说明：该命令还会读取网络内容";
+        let v = parse_verdict(raw).unwrap();
+        assert_eq!(v.capabilities, vec!["write"]);
+        assert!(!v.dangerous);
+
+        let raw2 = "{\"capabilities\":[],\"dangerous\":false,\"reason\":\"仅查看\"}\n{\"capabilities\":[\"delete\"],\"dangerous\":true,\"reason\":\"第二个 JSON\"}";
+        let v2 = parse_verdict(raw2).unwrap();
+        assert!(v2.capabilities.is_empty()); // 取第一个
     }
 }

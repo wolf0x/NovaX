@@ -108,6 +108,9 @@ async fn health(State(state): State<AppState>) -> Json<Value> {
 struct ChatRequest {
     message: String,
     session_id: Option<String>,
+    /// 前端界面语言（zh / en），缺省视为 zh；用户消息内显式指定语言时优先于它
+    #[serde(default)]
+    lang: Option<String>,
 }
 
 async fn chat(
@@ -147,7 +150,13 @@ async fn chat(
     );
 
     let session = SessionId::new(&session_id).map_err(err)?;
-    let content = Content::new("user").with_text(body.message.clone());
+    // 界面语言联动：默认按前端当前语言回复，用户在消息内显式指定语言时优先用户指定
+    let lang_hint = if body.lang.as_deref() == Some("en") {
+        "(System hint: current UI language is English. Reply in English unless the user explicitly requests another language in this message.)"
+    } else {
+        "(系统提示：当前界面语言为中文。除非用户在本条消息中明确要求其他语言，否则请用中文回复。)"
+    };
+    let content = Content::new("user").with_text(&format!("{lang_hint}\n{}", body.message));
     let mut stream = runner.run(user_id(), session, content).await.map_err(err)?;
 
     let (tx, rx) = tokio::sync::mpsc::channel::<Result<SseEvent, Infallible>>(128);
@@ -162,6 +171,8 @@ async fn chat(
     tokio::spawn(async move {
         let mut final_text = String::new();
         let mut turn_buf = String::new();
+        let mut flusher = SentenceFlusher::default();
+        let mut sent_text = String::new();
         while let Some(result) = stream.next().await {
             let events: Vec<Value> = match result {
                 Ok(event) => convert_event(&event, &mut final_text, &mut turn_buf),
@@ -173,6 +184,33 @@ async fn chat(
                 }
             }
             for data in events {
+                if data["type"] == "text" {
+                    // 整句缓冲：token 级增量攒成整句再下发，避免逐词蹦字；
+                    // 同时清理 DeepSeek 等模型中文 token 间的前导空格。
+                    let delta = data["text"].as_str().unwrap_or_default();
+                    for chunk in flusher.push(delta) {
+                        sent_text.push_str(&chunk);
+                        if let Ok(sse) = SseEvent::default()
+                            .json_data(json!({ "type": "text", "text": chunk, "partial": true }))
+                        {
+                            if tx.send(Ok(sse)).await.is_err() {
+                                return;
+                            }
+                        }
+                    }
+                    continue;
+                }
+                // 非文本事件（工具调用等）前先冲刷挂起文本，保证展示顺序
+                if let Some(rest) = flusher.take_pending() {
+                    sent_text.push_str(&rest);
+                    if let Ok(sse) = SseEvent::default()
+                        .json_data(json!({ "type": "text", "text": rest, "partial": true }))
+                    {
+                        if tx.send(Ok(sse)).await.is_err() {
+                            return;
+                        }
+                    }
+                }
                 let Ok(sse) = SseEvent::default().json_data(data) else {
                     continue;
                 };
@@ -181,12 +219,21 @@ async fn chat(
                 }
             }
         }
-        if !final_text.is_empty() {
+        // 流结束：冲刷最后一段挂起文本
+        if let Some(rest) = flusher.take_pending() {
+            sent_text.push_str(&rest);
+            if let Ok(sse) = SseEvent::default()
+                .json_data(json!({ "type": "text", "text": rest, "partial": true }))
+            {
+                let _ = tx.send(Ok(sse)).await;
+            }
+        }
+        if !sent_text.is_empty() {
             audit.log(
                 "chat",
                 "agent",
                 "",
-                &crate::audit::truncate(&final_text, 2000),
+                &crate::audit::truncate(&sent_text, 2000),
                 "ok",
                 &sid,
                 0,
@@ -292,6 +339,104 @@ fn convert_event(event: &Event, final_text: &mut String, turn_buf: &mut String) 
         }
     }
     out
+}
+
+// ---------------------------------------------------------------------------
+// 整句缓冲：把 token 级流式增量攒成整句下发，并清理中文间多余空格
+// ---------------------------------------------------------------------------
+
+/// 单块最大长度（字符数），超过则强制下发，避免长段落无终止符时缓冲过大。
+const FLUSH_MAX_CHARS: usize = 80;
+
+#[derive(Default)]
+struct SentenceFlusher {
+    pending: String,
+}
+
+impl SentenceFlusher {
+    /// 推入一段增量，返回可立即下发的完整句子块（可能为空）。
+    fn push(&mut self, mut delta: &str) -> Vec<String> {
+        // 中文间多余空格清理：前文以中文（含中文标点）结尾且增量以空格开头、
+        // 空格后仍是中文时，丢弃该前导空格（DeepSeek 等模型的中文 token 常带前导空格）。
+        if delta.starts_with(' ') {
+            if let Some(last) = self.pending.chars().next_back() {
+                if is_cjk(last) {
+                    let rest = delta.trim_start_matches(' ');
+                    if rest.chars().next().is_some_and(is_cjk) {
+                        delta = rest;
+                    }
+                }
+            }
+        }
+        self.pending.push_str(delta);
+
+        let mut out = Vec::new();
+        loop {
+            if self.pending.is_empty() {
+                break;
+            }
+            // 在句子终止符处切分；无终止符但超长时按阈值切分。
+            let cut = self
+                .pending
+                .char_indices()
+                .find(|(i, c)| {
+                    if !is_terminator(*c) {
+                        return false;
+                    }
+                    // 数字间的点（版本号 / IP / 小数）不作为句末，避免切碎 "1.2"、"127.0.0.1"
+                    if *c == '.' {
+                        let prev_num = self.pending[..*i]
+                            .chars()
+                            .next_back()
+                            .is_some_and(|p| p.is_ascii_digit());
+                        let next_num = self.pending[*i + 1..]
+                            .chars()
+                            .next()
+                            .is_some_and(|n| n.is_ascii_digit());
+                        if prev_num && next_num {
+                            return false;
+                        }
+                    }
+                    true
+                })
+                .map(|(i, c)| i + c.len_utf8());
+            match cut {
+                Some(pos) => {
+                    out.push(self.pending[..pos].to_string());
+                    self.pending.drain(..pos);
+                }
+                None if self.pending.chars().count() >= FLUSH_MAX_CHARS => {
+                    out.push(std::mem::take(&mut self.pending));
+                }
+                None => break,
+            }
+        }
+        out
+    }
+
+    /// 取走全部挂起文本（流结束或工具事件前调用）。
+    fn take_pending(&mut self) -> Option<String> {
+        if self.pending.is_empty() {
+            None
+        } else {
+            Some(std::mem::take(&mut self.pending))
+        }
+    }
+}
+
+/// 中文汉字与常用中文标点（空格清理的判定范围）。
+fn is_cjk(c: char) -> bool {
+    matches!(c as u32,
+        0x4E00..=0x9FFF      // 汉字
+        | 0x3400..=0x4DBF    // 扩展 A
+        | 0x3000..=0x303F    // 中文标点（。、《》等）
+        | 0xFF00..=0xFFEF    // 全角字符（！？：等）
+    )
+}
+
+/// 句子终止符（含换行）。
+fn is_terminator(c: char) -> bool {
+    matches!(c, '。' | '！' | '？' | '；' | '\n' | '.' | '!' | '?' | ';')
 }
 
 // ---------------------------------------------------------------------------
@@ -563,5 +708,51 @@ mod tests {
         assert_eq!(evts.len(), 1);
         assert_eq!(evts[0]["text"], "后半段");
         assert_eq!(final_text, "前半段后半段");
+    }
+
+    /// 整句缓冲：token 级增量攒到句号才下发，且清理中文间前导空格。
+    #[test]
+    fn flusher_sentence_and_cjk_spaces() {
+        let mut f = SentenceFlusher::default();
+        // DeepSeek 风格的 token 流：中文 token 带前导空格，无终止符时不下发
+        assert!(f.push("环境").is_empty());
+        assert!(f.push(" 很").is_empty());
+        assert!(f.push(" 干净").is_empty());
+        let chunks = f.push("。");
+        assert_eq!(chunks, vec!["环境很干净。"]);
+    }
+
+    /// 无终止符的长文本按阈值强制下发；结束时无残留。
+    #[test]
+    fn flusher_threshold_and_take_pending() {
+        let mut f = SentenceFlusher::default();
+        let long = "a".repeat(120);
+        let chunks = f.push(&long);
+        assert_eq!(chunks.len(), 1);
+        assert_eq!(chunks[0].len(), 120);
+        assert!(f.take_pending().is_none());
+
+        f.push("最后一句没有句号");
+        assert_eq!(f.take_pending(), Some("最后一句没有句号".to_string()));
+        assert!(f.take_pending().is_none());
+    }
+
+    /// 英文单词间空格、数字小数点不受空格清理影响；数字间的点不作句末。
+    #[test]
+    fn flusher_keeps_legit_spaces() {
+        let mut f = SentenceFlusher::default();
+        assert!(f.push("version 1.2").is_empty()); // 1.2 中的点不是句末
+        let chunks = f.push(" is out!");
+        assert_eq!(chunks, vec!["version 1.2 is out!"]);
+
+        // IP 地址跨增量拼接后内容完整（即使切分点在 IP 中间，前端累加渲染不受影响）
+        let mut joined = String::new();
+        let mut f3 = SentenceFlusher::default();
+        for d in ["服务地址 127.", "0.0.1:8899 可用。"] {
+            for c in f3.push(d) {
+                joined.push_str(&c);
+            }
+        }
+        assert_eq!(joined, "服务地址 127.0.0.1:8899 可用。");
     }
 }

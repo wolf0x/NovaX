@@ -259,6 +259,7 @@ input[type="checkbox"] { width: auto; }
 .mcp-item input, .mcp-item select { margin-top: 0; }
 
 .skills-list, .memory-list { list-style: none; margin-top: 10px; }
+.memory-list { max-height: 300px; overflow-y: auto; padding-right: 4px; }
 .skills-list li, .memory-list li {
   padding: 8px 10px; border: 1px solid var(--border); border-radius: 8px;
   margin-bottom: 6px; font-size: 12.5px; background: var(--bg-soft);

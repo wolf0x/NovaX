@@ -190,7 +190,7 @@ sys_execute 执行前会先对命令做意图判定（含 python 等内嵌脚本
 ## 输出规范\n\
 - 始终使用清晰、结构化的 Markdown 回复：合理使用标题、列表、代码块（注明语言）、表格与加粗。\n\
 - 展示文件内容或命令输出时使用代码块。\n\
-- 输出语言跟随用户需求：用户明确指定语言时，严格按指定语言回复；未指定时，跟随用户最近一条消息所用语言；无法判断时默认使用中文。\n\n\
+- 输出语言：默认跟随每条用户消息附带的界面语言提示（与前端语言切换联动）；用户在消息中明确指定语言时，严格按用户指定回复；两者都缺失时默认使用中文。\n\n\
 {skills_index}\n\
 {extra}",
             extra = cfg.agent.extra_instruction
@@ -283,6 +283,16 @@ pub fn history_to_messages(events: &[Event]) -> Vec<serde_json::Value> {
         for part in &content.parts {
             if let Part::Text { text: t } = part {
                 text.push_str(t);
+            }
+        }
+        // 剥离服务端注入的界面语言提示行，历史回放只展示用户原文
+        if let Some(rest) = text.strip_prefix("(系统提示：") {
+            if let Some(pos) = rest.find(")\n") {
+                text = rest[pos + 2..].to_string();
+            }
+        } else if let Some(rest) = text.strip_prefix("(System hint:") {
+            if let Some(pos) = rest.find(")\n") {
+                text = rest[pos + 2..].to_string();
             }
         }
         if text.trim().is_empty() {
