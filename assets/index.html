@@ -1,0 +1,183 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Nova Agent</title>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<header class="topbar">
+  <div class="brand">
+    <span class="logo">◆</span>
+    <span class="brand-name">Nova Agent</span>
+    <span class="brand-sub" data-i18n="brand_sub">ADK-Rust v2 自主智能体</span>
+  </div>
+  <nav class="tabs">
+    <button class="tab active" data-view="chat" data-i18n="tab_chat">对话</button>
+    <button class="tab" data-view="tasks" data-i18n="tab_tasks">任务</button>
+    <button class="tab" data-view="audit" data-i18n="tab_audit">审计日志</button>
+    <button class="tab" data-view="settings" data-i18n="tab_settings">设置</button>
+  </nav>
+  <button class="btn ghost small" id="btn-lang" title="Switch language / 切换语言">EN</button>
+  <div class="status" id="agent-status" title="Agent status">
+    <span class="dot" id="status-dot"></span>
+    <span id="status-text" data-i18n="status_checking">检测中</span>
+  </div>
+</header>
+
+<main>
+  <!-- 对话视图 -->
+  <section class="view" id="view-chat">
+    <div class="chat-layout">
+      <div class="chat-main">
+        <div class="session-bar">
+          <select id="session-select" title="Session"></select>
+          <button class="btn ghost" id="btn-new-session" data-i18n="new_session">＋ 新会话</button>
+          <span class="hint" id="session-hint"></span>
+        </div>
+        <div class="messages" id="messages">
+          <div class="welcome">
+            <h2 data-i18n="welcome_title">你好，我是 Nova</h2>
+            <p data-i18n="welcome_p1">我可以读取、编写、修改、删除文件并执行命令（均受门禁管控），还能加载技能、调用 MCP 工具、记忆你的偏好并为复杂任务制定计划。</p>
+            <p class="muted" data-i18n="welcome_p2">先在「设置」中配置模型 API，然后直接向我下达指令。</p>
+          </div>
+        </div>
+        <div class="approvals" id="approvals"></div>
+        <div class="composer">
+          <textarea id="chat-input" data-i18n-ph="input_placeholder" placeholder="输入指令，Enter 发送，Shift+Enter 换行" rows="2"></textarea>
+          <button class="btn primary" id="btn-send" data-i18n="send">发送</button>
+        </div>
+      </div>
+      <aside class="chat-side">
+        <h3 data-i18n="side_task_title">当前任务</h3>
+        <div id="side-task" class="side-card empty" data-i18n="no_active_task">暂无进行中的任务</div>
+        <h3 data-i18n="side_activity_title">工具活动</h3>
+        <div id="side-activity" class="side-card activity"></div>
+      </aside>
+    </div>
+  </section>
+
+  <!-- 任务视图 -->
+  <section class="view hidden" id="view-tasks">
+    <div class="page-head">
+      <h2 data-i18n="tasks_title">任务计划</h2>
+      <button class="btn ghost" id="btn-refresh-tasks" data-i18n="refresh">刷新</button>
+    </div>
+    <div id="tasks-list"></div>
+  </section>
+
+  <!-- 审计视图 -->
+  <section class="view hidden" id="view-audit">
+    <div class="page-head">
+      <h2 data-i18n="audit_title">审计日志</h2>
+      <div class="filters">
+        <select id="audit-type">
+          <option value="" data-i18n="all_types">全部类型</option>
+          <option value="chat">chat</option>
+          <option value="tool_call">tool_call</option>
+          <option value="gate_decision">gate_decision</option>
+          <option value="approval">approval</option>
+          <option value="config_change">config_change</option>
+          <option value="system">system</option>
+        </select>
+        <select id="audit-status">
+          <option value="" data-i18n="all_status">全部状态</option>
+          <option value="ok">ok</option>
+          <option value="denied">denied</option>
+          <option value="error">error</option>
+          <option value="pending">pending</option>
+        </select>
+        <input id="audit-tool" data-i18n-ph="tool_filter_ph" placeholder="工具名过滤">
+        <button class="btn ghost" id="btn-refresh-audit" data-i18n="query">查询</button>
+      </div>
+    </div>
+    <table class="audit-table" id="audit-table">
+      <thead>
+        <tr><th data-i18n="col_time">时间</th><th data-i18n="col_type">类型</th><th data-i18n="col_tool">工具</th><th data-i18n="col_args">参数</th><th data-i18n="col_result">结果</th><th data-i18n="col_status">状态</th><th data-i18n="col_duration">耗时</th></tr>
+      </thead>
+      <tbody></tbody>
+    </table>
+  </section>
+
+  <!-- 设置视图 -->
+  <section class="view hidden" id="view-settings">
+    <div class="page-head">
+      <h2 data-i18n="settings_title">设置</h2>
+      <div>
+        <span class="hint" id="config-path"></span>
+        <button class="btn primary" id="btn-save-settings" data-i18n="save_apply">保存并应用</button>
+      </div>
+    </div>
+    <div id="settings-error" class="alert hidden"></div>
+    <div class="settings-grid">
+      <div class="card">
+        <h3 data-i18n="model_config">模型配置</h3>
+        <label><span data-i18n="cfg_provider">提供商</span>
+          <select id="cfg-provider">
+            <option value="deepseek">DeepSeek</option>
+            <option value="gemini">Google Gemini</option>
+            <option value="openai_compatible" data-i18n="provider_openai_compat">OpenAI 兼容端点</option>
+            <option value="ollama" data-i18n="provider_ollama">Ollama 本地</option>
+            <option value="anthropic">Anthropic Claude</option>
+          </select>
+        </label>
+        <label><span data-i18n="cfg_api_key">API Key</span>
+          <input type="password" id="cfg-api-key" placeholder="sk-..." autocomplete="off">
+        </label>
+        <label><span data-i18n="cfg_model">模型</span>
+          <input id="cfg-model" placeholder="deepseek-chat / gemini-2.5-flash / gpt-4o ...">
+        </label>
+        <label><span data-i18n="cfg_base_url">Base URL（OpenAI 兼容 / Ollama 可选）</span>
+          <input id="cfg-base-url" placeholder="https://api.deepseek.com 或 http://127.0.0.1:11434">
+        </label>
+        <label><span data-i18n="cfg_max_iter">最大推理轮次</span>
+          <input type="number" id="cfg-max-iter" min="5" max="100">
+        </label>
+        <label><span data-i18n="cfg_extra">附加系统指令</span>
+          <textarea id="cfg-extra" rows="3" data-i18n-ph="cfg_extra_ph" placeholder="追加给智能体的行为约束（可选）"></textarea>
+        </label>
+      </div>
+
+      <div class="card">
+        <h3 data-i18n="gates_title">系统能力门禁</h3>
+        <p class="muted" data-i18n="gates_hint">每项能力独立开关；关闭后智能体调用将被直接拒绝。</p>
+        <div class="switch-row"><label class="switch"><input type="checkbox" id="gate-read"><span class="slider"></span></label><span data-i18n="gate_read">读取（文件/目录）</span></div>
+        <div class="switch-row"><label class="switch"><input type="checkbox" id="gate-write"><span class="slider"></span></label><span data-i18n="gate_write">写入（创建/覆盖文件）</span></div>
+        <div class="switch-row"><label class="switch"><input type="checkbox" id="gate-edit"><span class="slider"></span></label><span data-i18n="gate_edit">修改（精确替换内容）</span></div>
+        <div class="switch-row"><label class="switch"><input type="checkbox" id="gate-delete"><span class="slider"></span></label><span data-i18n="gate_delete">删除（文件/目录）</span></div>
+        <div class="switch-row"><label class="switch"><input type="checkbox" id="gate-execute"><span class="slider"></span></label><span data-i18n="gate_execute">运行（bash 命令）</span></div>
+        <h3 style="margin-top:18px" data-i18n="approval_title">高危操作人工审批</h3>
+        <p class="muted" data-i18n="approval_hint">勾选的能力执行前需在页面上人工批准。</p>
+        <div class="switch-row"><label class="switch"><input type="checkbox" id="appr-delete"><span class="slider"></span></label><span data-i18n="appr_delete">删除需审批</span></div>
+        <div class="switch-row"><label class="switch"><input type="checkbox" id="appr-execute"><span class="slider"></span></label><span data-i18n="appr_execute">运行需审批</span></div>
+        <div class="switch-row"><label class="switch"><input type="checkbox" id="appr-write"><span class="slider"></span></label><span data-i18n="appr_write">写入需审批</span></div>
+        <div class="switch-row"><label class="switch"><input type="checkbox" id="appr-edit"><span class="slider"></span></label><span data-i18n="appr_edit">修改需审批</span></div>
+        <label><span data-i18n="appr_timeout">审批超时（秒）</span>
+          <input type="number" id="cfg-appr-timeout" min="10" max="3600">
+        </label>
+      </div>
+
+      <div class="card">
+        <h3 data-i18n="mcp_title">MCP 服务器</h3>
+        <div id="mcp-list"></div>
+        <button class="btn ghost" id="btn-add-mcp" data-i18n="add_mcp">＋ 添加 MCP 服务器</button>
+        <h3 style="margin-top:18px" data-i18n="conn_status">连接状态</h3>
+        <div id="mcp-status" class="muted">-</div>
+      </div>
+
+      <div class="card">
+        <h3 data-i18n="skills_title">技能（SKILLS）</h3>
+        <p class="muted" data-i18n="skills_hint">将目录放入 skills/&lt;技能名&gt;/SKILL.md（frontmatter 含 name/description），点击刷新即可被智能体加载。</p>
+        <button class="btn ghost" id="btn-rescan-skills" data-i18n="rescan">重新扫描</button>
+        <ul id="skills-list" class="skills-list"></ul>
+        <h3 style="margin-top:18px" data-i18n="memory_title">记忆</h3>
+        <ul id="memory-list" class="memory-list"></ul>
+      </div>
+    </div>
+  </section>
+</main>
+
+<script src="/app.js"></script>
+</body>
+</html>

@@ -1,0 +1,37 @@
+[package]
+name = "nova-agent"
+version = "0.1.0"
+edition = "2021"
+description = "Autonomous agent built on ADK-Rust v2 with gated system capabilities"
+
+[dependencies]
+adk-rust = { version = "2.0.0", features = ["standard", "deepseek", "ollama", "mcp-http"] }
+tokio = { version = "1.40", features = ["full"] }
+tokio-stream = "0.1"
+axum = "0.8"
+serde = { version = "1.0", features = ["derive"] }
+schemars = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+toml = "0.9"
+anyhow = "1.0"
+thiserror = "2.0"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+rusqlite = { version = "0.37", features = ["bundled"] }
+uuid = { version = "1.0", features = ["v4"] }
+chrono = { version = "0.4", features = ["serde"] }
+futures = "0.3"
+async-stream = "0.3"
+async-trait = "0.1"
+
+[profile.dev]
+# 磁盘空间受限：关闭调试信息与增量编译，大幅缩减构建产物
+debug = false
+incremental = false
+
+[profile.test]
+debug = false
+
+[profile.release]
+lto = "thin"
+strip = true

@@ -1,0 +1,41 @@
+# NovaX 配置示例：复制为 config.toml 后按需修改（也可直接在 Web 设置页修改）
+
+mcp_servers = []
+# [[mcp_servers]]
+# name = "filesystem"
+# transport = "stdio"          # stdio 或 http
+# command = "npx"
+# args = ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"]
+# env = {}
+# url = ""                     # transport = "http" 时填写
+# enabled = true
+
+[server]
+host = "127.0.0.1"
+port = 8899
+
+[model]
+# provider: deepseek | gemini | openai_compatible | ollama | anthropic
+provider = "deepseek"
+api_key = ""
+model = "deepseek-chat"
+base_url = ""
+max_iterations = 30
+
+[gates]
+read = true
+write = true
+edit = true
+delete = false
+execute = false
+
+[approval]
+require_for = ["delete", "execute"]
+timeout_secs = 300
+
+[paths]
+data_dir = "data"
+skills_dir = "skills"
+
+[agent]
+extra_instruction = ""
