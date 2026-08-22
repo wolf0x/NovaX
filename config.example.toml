@@ -36,6 +36,7 @@ timeout_secs = 300
 [paths]
 data_dir = "data"
 skills_dir = "skills"
+output_dir = "output"
 
 [agent]
 extra_instruction = ""

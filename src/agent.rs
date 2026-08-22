@@ -13,6 +13,7 @@ use adk_rust::runner::Runner;
 use adk_rust::session::{CreateRequest, GetRequest, InMemorySessionService, ListRequest, SessionService};
 use adk_rust::{SessionId, UserId};
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 const APP_NAME: &str = "nova_agent";
@@ -79,6 +80,10 @@ pub struct AgentHub {
     memory: Arc<MemoryStore>,
     tasks: Arc<TaskStore>,
     bus: EventBus,
+    /// 工作区根目录（与二进制同级）
+    workspace: PathBuf,
+    /// 制品输出目录（workspace/output）
+    output_dir: PathBuf,
 }
 
 impl AgentHub {
@@ -91,6 +96,8 @@ impl AgentHub {
         memory: Arc<MemoryStore>,
         tasks: Arc<TaskStore>,
         bus: EventBus,
+        workspace: PathBuf,
+        output_dir: PathBuf,
     ) -> Arc<Self> {
         Arc::new(Self {
             runner: tokio::sync::RwLock::new(None),
@@ -103,6 +110,8 @@ impl AgentHub {
             memory,
             tasks,
             bus,
+            workspace,
+            output_dir,
         })
     }
 
@@ -176,6 +185,12 @@ impl AgentHub {
             }
         );
 
+        let workspace_line = format!(
+            "工作区根目录：{}\n制品输出目录：{}（所有生成的文件、报告、制品必须写入此目录下）\n",
+            self.workspace.display(),
+            self.output_dir.display(),
+        );
+
         format!(
             "你是 Nova，一个运行在本地 Linux 系统上的自主智能体（基于 ADK-Rust 构建）。\n\n\
 ## 能力\n\
@@ -183,7 +198,10 @@ impl AgentHub {
 {approval_line}\n\
 sys_execute 执行前会先对命令做意图判定（含 python 等内嵌脚本）：意图不触及需审批能力时放行，触及被管控能力或具有破坏性时转入人工审批。\n\
 严禁绕过门禁：不得用其他工具完成被禁用能力对应的操作（例如删除能力被禁用时，绝对不允许通过任何形式的命令或脚本删除文件，也不得用写文件方式变相删除）。若某操作被拒绝或禁用，向用户解释原因并给出替代建议，不要尝试同参数的变体重试。\n\n\
-外部 MCP 工具若可用，可直接调用；但 MCP 工具同样受门禁约束：绝对不得用 MCP 工具完成被禁用能力对应的操作（如用文件系统类 MCP 工具删除/写入被禁的能力）。\n\n\n\
+外部 MCP 工具若可用，可直接调用；但 MCP 工具同样受门禁约束：绝对不得用 MCP 工具完成被禁用能力对应的操作（如用文件系统类 MCP 工具删除/写入被禁的能力）。\n\n\
+## 工作区\n\
+{workspace_line}\
+用 sys_write 创建文件时，除非用户明确指定了其他路径，否则一律使用制品输出目录的绝对路径。\n\n\
 ## 记忆与规划\n\
 - 用 memory_remember 保存用户偏好、约定与重要事实；回答前先 memory_recall 检索相关记忆。\n\
 - 多步骤任务（≥3 步）必须先用 task_plan 制定计划，每完成一步用 task_update 更新进度。\n\n\

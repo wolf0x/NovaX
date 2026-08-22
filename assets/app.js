@@ -465,10 +465,12 @@ async function sendChat() {
       while ((idx = sseBuf.indexOf("\n\n")) >= 0) {
         const block = sseBuf.slice(0, idx);
         sseBuf = sseBuf.slice(idx + 2);
-        const dataLine = block.split("\n").find((l) => l.startsWith("data:"));
-        if (!dataLine) continue;
+        // SSE 规范：多行 data 字段需拼接（axum 对含换行的 JSON 会拆成多个 data: 行）
+        const dataLines = block.split("\n").filter((l) => l.startsWith("data:"));
+        if (!dataLines.length) continue;
+        const raw = dataLines.map((l) => l.slice(5)).join("\n");
         let evt;
-        try { evt = JSON.parse(dataLine.slice(5).trim()); } catch { continue; }
+        try { evt = JSON.parse(raw.trim()); } catch { continue; }
         handleChatEvent(evt);
       }
     }

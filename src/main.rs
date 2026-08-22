@@ -27,30 +27,42 @@ async fn main() -> anyhow::Result<()> {
         .with_target(false)
         .init();
 
-    // 1. 配置（相对于启动目录解析，启动日志会打印实际路径）
-    let config_path = std::env::current_dir()?.join("config.toml");
+    // 1. 工作区：与二进制同级的 workspace 目录
+    let exe_dir = std::env::current_exe()?
+        .parent()
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
+    let workspace = exe_dir.join("workspace");
+    std::fs::create_dir_all(&workspace).ok();
+
+    // 2. 配置（workspace/config.toml）
+    let config_path = workspace.join("config.toml");
     let store = ConfigStore::load(&config_path)?;
     let cfg = store.get().await;
+    println!("工作区目录: {}", workspace.display());
     println!("配置文件: {}", config_path.display());
-    let data_dir = cfg.paths.data_dir.clone();
-    let skills_dir = cfg.paths.skills_dir.clone();
+
+    let data_dir = workspace.join(&cfg.paths.data_dir);
+    let skills_dir = workspace.join(&cfg.paths.skills_dir);
+    let output_dir = workspace.join(&cfg.paths.output_dir);
     std::fs::create_dir_all(&data_dir).ok();
     std::fs::create_dir_all(&skills_dir).ok();
+    std::fs::create_dir_all(&output_dir).ok();
 
-    // 2. 基础服务
-    let audit = Arc::new(audit::AuditLog::open(format!("{data_dir}/audit.db"))?);
-    let memory = Arc::new(memory::MemoryStore::load(format!("{data_dir}/memory.jsonl"))?);
+    // 3. 基础服务
+    let audit = Arc::new(audit::AuditLog::open(data_dir.join("audit.db").to_string_lossy().to_string())?);
+    let memory = Arc::new(memory::MemoryStore::load(data_dir.join("memory.jsonl").to_string_lossy().to_string())?);
     let bus = EventBus::new();
     let approvals = ApprovalManager::new(bus.clone(), audit.clone());
     let gate = GateKeeper::new(store.clone(), approvals.clone(), audit.clone());
     let skills = skills::SkillRegistry::new(&skills_dir).await;
-    let tasks = tools::planner::TaskStore::load(format!("{data_dir}/tasks.json"), bus.clone())?;
+    let tasks = tools::planner::TaskStore::load(data_dir.join("tasks.json").to_string_lossy().to_string(), bus.clone())?;
 
-    // 3. MCP 连接
+    // 4. MCP 连接
     let mcp = mcp::McpHub::new();
     mcp.rebuild(&cfg.mcp_servers).await;
 
-    // 4. 智能体（模型未配置时仍启动服务，可在 Settings 中配置后热生效）
+    // 5. 智能体（模型未配置时仍启动服务，可在 Settings 中配置后热生效）
     let hub = agent::AgentHub::new(
         store.clone(),
         skills.clone(),
@@ -60,6 +72,8 @@ async fn main() -> anyhow::Result<()> {
         memory.clone(),
         tasks.clone(),
         bus.clone(),
+        workspace.clone(),
+        output_dir.clone(),
     );
     match hub.rebuild().await {
         Ok(()) => tracing::info!("agent ready ({} / {})", cfg.model.provider, cfg.model.model),
@@ -75,7 +89,7 @@ async fn main() -> anyhow::Result<()> {
         0,
     );
 
-    // 5. Web 服务
+    // 6. Web 服务
     let state = server::AppState {
         config: store,
         audit,

@@ -129,6 +129,7 @@ impl Default for IntentConfig {
 pub struct PathsConfig {
     pub data_dir: String,
     pub skills_dir: String,
+    pub output_dir: String,
 }
 
 impl Default for PathsConfig {
@@ -136,6 +137,7 @@ impl Default for PathsConfig {
         Self {
             data_dir: "data".into(),
             skills_dir: "skills".into(),
+            output_dir: "output".into(),
         }
     }
 }
