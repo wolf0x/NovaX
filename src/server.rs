@@ -33,6 +33,8 @@ pub struct AppState {
     pub tasks: Arc<TaskStore>,
     pub mcp: Arc<McpHub>,
     pub hub: Arc<AgentHub>,
+    /// 当前正在进行的对话运行：session_id -> 中止信号（用户点击 STOP 时触发）
+    pub runs: Arc<std::sync::Mutex<std::collections::HashMap<String, Arc<tokio::sync::Notify>>>>,
 }
 
 #[derive(Serialize)]
@@ -57,6 +59,7 @@ pub fn router(state: AppState) -> Router {
         .route("/app.js", get(app_js))
         .route("/api/health", get(health))
         .route("/api/chat", post(chat))
+        .route("/api/chat/stop", post(chat_stop))
         .route("/api/events", get(events_stream))
         .route("/api/settings", get(get_settings).put(put_settings))
         .route("/api/audit", get(get_audit))
@@ -163,6 +166,15 @@ async fn chat(
     let audit = state.audit.clone();
     let sid = session_id.clone();
 
+    // 注册本次运行，供 /api/chat/stop 中止
+    let stop_notify = Arc::new(tokio::sync::Notify::new());
+    state
+        .runs
+        .lock()
+        .unwrap()
+        .insert(session_id.clone(), stop_notify.clone());
+    let runs = state.runs.clone();
+
     // 先发会话标识
     if let Ok(sse) = SseEvent::default().json_data(json!({ "type": "session", "session_id": sid })) {
         let _ = tx.send(Ok(sse)).await;
@@ -173,7 +185,34 @@ async fn chat(
         let mut turn_buf = String::new();
         let mut flusher = SentenceFlusher::default();
         let mut sent_text = String::new();
-        while let Some(result) = stream.next().await {
+        let mut stopped = false;
+        let mut disconnected = false;
+
+        loop {
+            // 用户中止信号 与 模型事件流 竞争；中止分支置位后退出循环，
+            // 丢弃未处理的后续事件（已启动的子命令因 kill_on_drop 一并终止）
+            enum Pump {
+                Stopped,
+                End,
+                Item(adk_rust::Result<Event>),
+            }
+            let pump = tokio::select! {
+                biased;
+                _ = stop_notify.notified() => Pump::Stopped,
+                item = stream.next() => match item {
+                    Some(result) => Pump::Item(result),
+                    None => Pump::End,
+                },
+            };
+            let result = match pump {
+                Pump::Stopped => {
+                    stopped = true;
+                    break;
+                }
+                Pump::End => break,
+                Pump::Item(result) => result,
+            };
+
             let events: Vec<Value> = match result {
                 Ok(event) => convert_event(&event, &mut final_text, &mut turn_buf),
                 Err(e) => vec![json!({ "type": "error", "message": e.to_string() })],
@@ -194,9 +233,12 @@ async fn chat(
                             .json_data(json!({ "type": "text", "text": chunk, "partial": true }))
                         {
                             if tx.send(Ok(sse)).await.is_err() {
-                                return;
+                                disconnected = true;
                             }
                         }
+                    }
+                    if disconnected {
+                        break;
                     }
                     continue;
                 }
@@ -207,7 +249,8 @@ async fn chat(
                         .json_data(json!({ "type": "text", "text": rest, "partial": true }))
                     {
                         if tx.send(Ok(sse)).await.is_err() {
-                            return;
+                            disconnected = true;
+                            break;
                         }
                     }
                 }
@@ -215,17 +258,32 @@ async fn chat(
                     continue;
                 };
                 if tx.send(Ok(sse)).await.is_err() {
-                    return; // 客户端断开
+                    disconnected = true; // 客户端断开
+                    break;
                 }
             }
+            if disconnected {
+                break;
+            }
         }
-        // 流结束：冲刷最后一段挂起文本
-        if let Some(rest) = flusher.take_pending() {
-            sent_text.push_str(&rest);
-            if let Ok(sse) = SseEvent::default()
-                .json_data(json!({ "type": "text", "text": rest, "partial": true }))
-            {
+
+        // 中止：通知前端，审计留痕（已发送的部分内容仍记录）
+        if stopped {
+            audit.log("chat", "agent", "", "用户中止了本次运行", "denied", &sid, 0);
+            if let Ok(sse) = SseEvent::default().json_data(json!({ "type": "stopped" })) {
                 let _ = tx.send(Ok(sse)).await;
+            }
+        }
+
+        // 冲刷最后一段挂起文本（客户端断开时跳过）
+        if !disconnected {
+            if let Some(rest) = flusher.take_pending() {
+                sent_text.push_str(&rest);
+                if let Ok(sse) = SseEvent::default()
+                    .json_data(json!({ "type": "text", "text": rest, "partial": true }))
+                {
+                    let _ = tx.send(Ok(sse)).await;
+                }
             }
         }
         if !sent_text.is_empty() {
@@ -239,13 +297,39 @@ async fn chat(
                 0,
             );
         }
-        let Ok(done) = SseEvent::default().json_data(json!({ "type": "done" })) else {
-            return;
-        };
-        let _ = tx.send(Ok(done)).await;
+        if !disconnected {
+            if let Ok(done) = SseEvent::default().json_data(json!({ "type": "done" })) {
+                let _ = tx.send(Ok(done)).await;
+            }
+        }
+
+        // 清理运行注册表：仅当登记的仍是本次运行的信号时才移除，
+        // 避免误删用户中止后立刻发起的新运行
+        let mut r = runs.lock().unwrap();
+        if r.get(&sid).map(|n| Arc::ptr_eq(n, &stop_notify)).unwrap_or(false) {
+            r.remove(&sid);
+        }
     });
 
     Ok(Sse::new(tokio_stream::wrappers::ReceiverStream::new(rx)).keep_alive(KeepAlive::default()))
+}
+
+/// 中止指定会话当前正在进行的运行；用户随后可补充上下文再次发送。
+#[derive(Deserialize)]
+struct StopRequest {
+    session_id: String,
+}
+
+async fn chat_stop(State(state): State<AppState>, Json(body): Json<StopRequest>) -> Json<Value> {
+    let notify = state.runs.lock().unwrap().get(&body.session_id).cloned();
+    match notify {
+        Some(n) => {
+            n.notify_one();
+            state.audit.log("chat", "user", "stop", "用户请求中止当前运行", "ok", &body.session_id, 0);
+            Json(json!({ "ok": true }))
+        }
+        None => Json(json!({ "ok": false, "error": "无正在进行的运行" })),
+    }
 }
 
 async fn session_exists(state: &AppState, session_id: &str) -> bool {

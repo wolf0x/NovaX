@@ -108,6 +108,24 @@ impl ApprovalConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
+pub struct IntentConfig {
+    /// 是否对命令执行做意图判定；关闭后回退到关键词启发式（删除类命令仍受 delete 门禁）
+    pub enabled: bool,
+    /// 单次判定的超时（秒）
+    pub timeout_secs: u64,
+}
+
+impl Default for IntentConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            timeout_secs: 45,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct PathsConfig {
     pub data_dir: String,
     pub skills_dir: String,
@@ -159,6 +177,7 @@ pub struct Config {
     pub model: ModelConfig,
     pub gates: GatesConfig,
     pub approval: ApprovalConfig,
+    pub intent: IntentConfig,
     pub paths: PathsConfig,
     pub agent: AgentBehavior,
     pub mcp_servers: Vec<McpServerConfig>,

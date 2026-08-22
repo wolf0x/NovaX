@@ -1,18 +1,22 @@
-//! 命令意图判定：由 LLM 判定待执行命令的最终意图（穿透 python/node 脚本、
-//! 管道、base64 等表面形式），输出涉及的系统能力与危险性，门禁据此放行或转入审批。
+//! 命令意图判定模块（可插拔）。
+//!
+//! 对外暴露 [`IntentClassifier`] trait 与统一的 [`IntentVerdict`] 结果；
+//! 当前内置 [`LlmIntentClassifier`]（由主模型穿透 python/管道/base64 等表面形式
+//! 判定最终意图）。未来可新增实现（规则引擎、专用小模型等），在装配处替换即可，
+//! 门禁流水线（`tools/system.rs`）无需改动。
+//! 行为开关与超时见 config.toml 的 `[intent]` 段。
 
 use crate::agent::build_model;
 use crate::config::ConfigStore;
 use adk_rust::{Content, GenerateContentConfig, LlmRequest, Part};
+use async_trait::async_trait;
 use futures::StreamExt;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
-const JUDGE_TIMEOUT_SECS: u64 = 45;
-
-/// 意图判定结果
+/// 意图判定结果（所有分类器实现统一输出）
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct IntentVerdict {
     /// 涉及的系统能力：read / write / edit / delete 的子集；为空表示未触及文件类能力
@@ -24,6 +28,26 @@ pub struct IntentVerdict {
     /// 简短理由（展示给审批用户）
     #[serde(default)]
     pub reason: String,
+}
+
+/// 命令意图分类器：门禁流水线的可插拔扩展点。
+///
+/// 返回 `Err` 表示分类器不可用（未配置模型、调用失败、输出不可解析等），
+/// 调用方必须走保守兑底路径，不得直接放行。
+#[async_trait]
+pub trait IntentClassifier: Send + Sync {
+    async fn classify(&self, command: &str) -> anyhow::Result<IntentVerdict>;
+}
+
+/// 基于主模型的 LLM 意图分类器（当前默认实现）。
+pub struct LlmIntentClassifier {
+    config: Arc<ConfigStore>,
+}
+
+impl LlmIntentClassifier {
+    pub fn new(config: Arc<ConfigStore>) -> Arc<Self> {
+        Arc::new(Self { config })
+    }
 }
 
 const JUDGE_PROMPT: &str = "你是安全门禁的「命令意图判定器」。分析给定的 shell 命令，判定它的最终意图。\
@@ -39,17 +63,9 @@ const JUDGE_PROMPT: &str = "你是安全门禁的「命令意图判定器」。�
 只输出一行 JSON，不要输出任何其他文字，格式：\
 {\"capabilities\":[\"delete\"],\"dangerous\":true,\"reason\":\"简短理由\"}";
 
-pub struct IntentJudge {
-    config: Arc<ConfigStore>,
-}
-
-impl IntentJudge {
-    pub fn new(config: Arc<ConfigStore>) -> Arc<Self> {
-        Arc::new(Self { config })
-    }
-
-    /// 对命令做意图判定。模型未配置、调用失败或输出不可解析时返回 Err（调用方需走保守兜底）。
-    pub async fn judge(&self, command: &str) -> anyhow::Result<IntentVerdict> {
+#[async_trait]
+impl IntentClassifier for LlmIntentClassifier {
+    async fn classify(&self, command: &str) -> anyhow::Result<IntentVerdict> {
         let cfg = self.config.get().await;
         let model = build_model(&cfg.model)?;
 
@@ -65,8 +81,9 @@ impl IntentJudge {
             previous_response_id: None,
         };
 
+        let timeout = Duration::from_secs(cfg.intent.timeout_secs.max(5));
         let stream = model.generate_content(request, false).await?;
-        let raw = tokio::time::timeout(Duration::from_secs(JUDGE_TIMEOUT_SECS), collect_text(stream))
+        let raw = tokio::time::timeout(timeout, collect_text(stream))
             .await
             .map_err(|_| anyhow::anyhow!("意图判定超时"))??;
 

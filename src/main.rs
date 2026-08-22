@@ -86,6 +86,7 @@ async fn main() -> anyhow::Result<()> {
         tasks,
         mcp,
         hub,
+        runs: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
     };
     server::serve(state).await?;
     Ok(())

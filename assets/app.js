@@ -8,6 +8,9 @@ const state = {
   streaming: false,
   settings: null,
   mcpServers: [],
+  abortController: null,
+  attachments: [],
+  skillsCache: null,
 };
 
 /* ============================ 国际化（中/英） ============================ */
@@ -47,6 +50,11 @@ const I18N = {
     you: "你", events: "事件", empty_msg: "消息不能为空",
     mcp_name_ph: "名称", mcp_cmd_ph: "command（stdio）", mcp_args_ph: "args，空格分隔",
     mcp_url_ph: "url（http）", mcp_env_ph: "env：K=V;K2=V2", del: "删除",
+    stop: "停止", stopped_note: "本次运行已被用户中止。可补充上下文后再次发送。",
+    attach_title: "附加文件（或拖放到此处）", attachment: "附件",
+    file_too_large: "文件过大（上限 512KB），已跳过：", file_binary: "二进制文件暂不支持作为文本附加：",
+    select_skill: "选择技能", skill_intro: "请先用 load_skill 加载技能并严格遵循其指引。用户请求：",
+    skill_default_task: "（按技能说明执行）",
   },
   en: {
     brand_sub: "Autonomous agent on ADK-Rust v2",
@@ -82,6 +90,11 @@ const I18N = {
     you: "You", events: "events", empty_msg: "Message cannot be empty",
     mcp_name_ph: "name", mcp_cmd_ph: "command (stdio)", mcp_args_ph: "args, space separated",
     mcp_url_ph: "url (http)", mcp_env_ph: "env: K=V;K2=V2", del: "Delete",
+    stop: "Stop", stopped_note: "This run was stopped by you. Add more context and send again.",
+    attach_title: "Attach files (or drag & drop)", attachment: "Attachment",
+    file_too_large: "File too large (max 512KB), skipped: ", file_binary: "Binary file not supported as text: ",
+    select_skill: "Select a skill", skill_intro: "First load the skill with load_skill and follow it strictly. User request: ",
+    skill_default_task: "(execute per the skill instructions)",
   },
 };
 
@@ -98,8 +111,12 @@ function applyI18n() {
   document.querySelectorAll("[data-i18n-ph]").forEach((el) => {
     el.placeholder = t(el.dataset.i18nPh);
   });
+  document.querySelectorAll("[data-i18n-title]").forEach((el) => {
+    el.title = t(el.dataset.i18nTitle);
+  });
   const btn = $("#btn-lang");
   if (btn) btn.textContent = lang === "zh" ? "EN" : "中文";
+  updateSendButton();
 }
 
 function setLang(next) {
@@ -310,15 +327,68 @@ function appendToolChip(name, args) {
   return div;
 }
 
+/* 发送/停止按钮状态切换 */
+function updateSendButton() {
+  const btn = $("#btn-send");
+  if (!btn) return;
+  if (state.streaming) {
+    btn.textContent = t("stop");
+    btn.className = "btn danger";
+    btn.disabled = false;
+  } else {
+    btn.textContent = t("send");
+    btn.className = "btn primary";
+    btn.disabled = false;
+  }
+}
+
+/* 用户点击 STOP：中止当前运行（可补充上下文后再次发送） */
+async function stopRun() {
+  if (!state.sessionId) return;
+  try {
+    await fetch("/api/chat/stop", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ session_id: state.sessionId }),
+    });
+  } catch {}
+  // 正常情况由服务端下发 stopped 事件收尾；若 3 秒内无响应则兑底断开。
+  // 定时器与本次运行的 controller 绑定身份，避免误中止用户随后发起的新运行
+  const ac = state.abortController;
+  setTimeout(() => {
+    if (state.streaming && state.abortController === ac) ac.abort();
+  }, 3000);
+}
+
+/* 组装最终消息：/skill 指令转换 + 附件内容拼接 */
+function composeMessage(raw) {
+  let message = raw;
+  const m = raw.match(/^\/skill\s+(\S+)\s*([\s\S]*)$/);
+  if (m) {
+    const rest = (m[2] || "").trim();
+    message = `${t("skill_intro")}「${m[1]}」\n${rest || t("skill_default_task")}`;
+  }
+  for (const a of state.attachments) {
+    message += `\n\n---\n${t("attachment")}：${a.name}\n\`\`\`\n${a.content}\n\`\`\``;
+  }
+  return message;
+}
+
 async function sendChat() {
   if (state.streaming) return;
   const input = $("#chat-input");
-  const message = input.value.trim();
-  if (!message) return;
+  const raw = input.value.trim();
+  if (!raw && !state.attachments.length) return;
+  hideSkillPopup();
+  const displayText = raw + state.attachments.map((a) => `\n📎 ${a.name}`).join("");
+  const message = composeMessage(raw);
   input.value = "";
-  appendMessage("user", message, false);
+  state.attachments = [];
+  renderAttachments();
+  appendMessage("user", displayText, false);
   state.streaming = true;
-  $("#btn-send").disabled = true;
+  updateSendButton();
+  state.abortController = new AbortController();
 
   let assistantEl = null;
   let buffer = "";
@@ -361,6 +431,10 @@ async function sendChat() {
       case "error":
         appendMessage("model", `**${t("error")}**：${evt.message}`, false);
         break;
+      case "stopped":
+        if (assistantEl) assistantEl.classList.remove("cursor");
+        appendMessage("model", `*${t("stopped_note")}*`, false);
+        break;
       case "done":
         if (assistantEl) assistantEl.classList.remove("cursor");
         break;
@@ -372,6 +446,7 @@ async function sendChat() {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ message, session_id: state.sessionId, lang }),
+      signal: state.abortController.signal,
     });
     if (!resp.ok || !resp.body) {
       let msg = `${t("req_failed")} (${resp.status})`;
@@ -398,17 +473,28 @@ async function sendChat() {
       }
     }
   } catch (e) {
-    appendMessage("model", `**${t("conn_err")}**：${e.message || e}`, false);
+    if (e.name !== "AbortError") {
+      appendMessage("model", `**${t("conn_err")}**：${e.message || e}`, false);
+    }
   } finally {
     state.streaming = false;
-    $("#btn-send").disabled = false;
+    state.abortController = null;
+    updateSendButton();
     loadSessions(state.sessionId);
   }
 }
 
-$("#btn-send").addEventListener("click", sendChat);
+$("#btn-send").addEventListener("click", () => {
+  if (state.streaming) stopRun();
+  else sendChat();
+});
 $("#chat-input").addEventListener("keydown", (e) => {
-  if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); sendChat(); }
+  if (e.key === "Enter" && !e.shiftKey) {
+    e.preventDefault();
+    if (state.streaming) stopRun();
+    else sendChat();
+  }
+  if (e.key === "Escape") hideSkillPopup();
 });
 
 /* ============================ 实时事件（审批/任务/活动） ============================ */
@@ -675,6 +761,8 @@ $("#btn-save-settings").addEventListener("click", async () => {
       require_for: requireFor,
       timeout_secs: parseInt($("#cfg-appr-timeout").value || "300", 10),
     },
+    // 回传服务端下发的 [intent] 原值，避免保存时静默重置（UI 暂未提供该配置项）
+    intent: state.settings.config.intent,
     agent: { extra_instruction: $("#cfg-extra").value },
     mcp_servers: state.mcpServers,
   };
@@ -729,6 +817,122 @@ async function loadMemory() {
     .map((e) => `<li>[${escapeHtml(e.category)}] ${escapeHtml(e.content)}<div class="m-ts">${e.ts} · ${escapeHtml((e.tags || []).join(", "))}</div></li>`)
     .join("");
 }
+
+/* ============================ 附件（按钮上传 + 拖放） ============================ */
+
+const MAX_ATTACH_SIZE = 512 * 1024;
+
+function renderAttachments() {
+  const box = $("#attachments");
+  if (!state.attachments.length) {
+    box.classList.add("hidden");
+    box.innerHTML = "";
+    return;
+  }
+  box.classList.remove("hidden");
+  box.innerHTML = state.attachments
+    .map(
+      (a, i) => `<span class="attach-chip">📎 ${escapeHtml(a.name)}
+        <span class="muted">${(a.content.length / 1024).toFixed(1)}KB</span>
+        <button data-i="${i}" title="×">×</button></span>`
+    )
+    .join("");
+  box.querySelectorAll("button").forEach((btn) =>
+    btn.addEventListener("click", () => {
+      state.attachments.splice(Number(btn.dataset.i), 1);
+      renderAttachments();
+    })
+  );
+}
+
+async function handleFiles(fileList) {
+  for (const file of fileList) {
+    if (file.size > MAX_ATTACH_SIZE) {
+      appendMessage("model", `**${t("error")}**：${t("file_too_large")}${escapeHtml(file.name)}`, false);
+      continue;
+    }
+    let text;
+    try {
+      text = await file.text();
+    } catch {
+      appendMessage("model", `**${t("error")}**：${t("file_binary")}${escapeHtml(file.name)}`, false);
+      continue;
+    }
+    if (text.slice(0, 4096).includes("\u0000")) {
+      appendMessage("model", `**${t("error")}**：${t("file_binary")}${escapeHtml(file.name)}`, false);
+      continue;
+    }
+    state.attachments.push({ name: file.name, content: text });
+  }
+  renderAttachments();
+}
+
+$("#btn-attach").addEventListener("click", () => $("#file-input").click());
+$("#file-input").addEventListener("change", (e) => {
+  handleFiles(e.target.files);
+  e.target.value = "";
+});
+
+const composer = $("#composer");
+["dragenter", "dragover"].forEach((ev) =>
+  composer.addEventListener(ev, (e) => {
+    e.preventDefault();
+    composer.classList.add("dragover");
+  })
+);
+["dragleave", "drop"].forEach((ev) =>
+  composer.addEventListener(ev, (e) => {
+    e.preventDefault();
+    composer.classList.remove("dragover");
+  })
+);
+composer.addEventListener("drop", (e) => {
+  if (e.dataTransfer && e.dataTransfer.files.length) handleFiles(e.dataTransfer.files);
+});
+
+/* ============================ /skill 技能选择 ============================ */
+
+function hideSkillPopup() {
+  $("#skill-popup").classList.add("hidden");
+}
+
+async function maybeShowSkillPopup() {
+  const input = $("#chat-input");
+  const popup = $("#skill-popup");
+  const v = input.value;
+  // 输入以 /skill 开头（尚未选完）时展示技能列表；已输入 "/skill 名称" 后不再弹窗干扰输入
+  if (!v.startsWith("/skill") || /\/skill\s+\S+\s/.test(v)) {
+    hideSkillPopup();
+    return;
+  }
+  if (!state.skillsCache) {
+    try {
+      const r = await fetch("/api/skills");
+      const d = await r.json();
+      state.skillsCache = d.skills || [];
+    } catch {
+      state.skillsCache = [];
+    }
+  }
+  const skills = state.skillsCache;
+  popup.innerHTML = `<div class="sp-title">${t("select_skill")}</div>` +
+    (skills.length
+      ? skills
+          .map((s) => `<div class="sp-item" data-name="${escapeHtml(s.name)}">
+            <b>${escapeHtml(s.name)}</b><span class="muted">${escapeHtml(s.description || "")}</span></div>`)
+          .join("")
+      : `<div class="sp-item muted">${t("no_skills")}</div>`);
+  popup.classList.remove("hidden");
+  popup.querySelectorAll(".sp-item[data-name]").forEach((el) =>
+    el.addEventListener("click", () => {
+      input.value = `/skill ${el.dataset.name} `;
+      hideSkillPopup();
+      input.focus();
+    })
+  );
+}
+
+$("#chat-input").addEventListener("input", maybeShowSkillPopup);
 
 /* ============================ 初始化 ============================ */
 

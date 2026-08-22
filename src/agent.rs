@@ -128,7 +128,7 @@ impl AgentHub {
             gate: self.gate.clone(),
             audit: self.audit.clone(),
             bus: self.bus.clone(),
-            judge: crate::intent::IntentJudge::new(self.config.clone()),
+            judge: crate::intent::LlmIntentClassifier::new(self.config.clone()),
         };
         let mut tools: Vec<Arc<dyn Tool>> = tools::system::build_system_tools(&sys_deps);
         tools.extend(tools::memory_tools::build_memory_tools(

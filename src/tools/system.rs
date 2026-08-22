@@ -5,7 +5,7 @@
 use crate::audit::AuditLog;
 use crate::events::EventBus;
 use crate::gate::GateKeeper;
-use crate::intent::IntentJudge;
+use crate::intent::IntentClassifier;
 use adk_rust::prelude::*;
 use adk_rust::tool::FunctionTool;
 use serde_json::{json, Value};
@@ -19,7 +19,8 @@ pub struct SystemToolDeps {
     pub gate: Arc<GateKeeper>,
     pub audit: Arc<AuditLog>,
     pub bus: EventBus,
-    pub judge: Arc<IntentJudge>,
+    /// 命令意图分类器（可插拔，见 intent 模块）
+    pub judge: Arc<dyn IntentClassifier>,
 }
 
 /// 构建全部五个系统能力工具
@@ -347,9 +348,12 @@ fn execute_tool(deps: &SystemToolDeps) -> Arc<dyn Tool> {
                 let summary = format!("执行命令: {command}");
                 let args_for_gate = args.clone();
                 Ok(run_gated(&deps, "execute", "sys_execute", &summary, &args, move || async move {
-                    // 意图判定流水线：以 LLM 对命令最终意图的判定为准（穿透 python 等脚本形式），
-                    // 关键词规则仅作为判定不可用时的保守兑底。
-                    match judge.judge(&command).await {
+                    // 意图判定流水线：以分类器对命令最终意图的判定为准（穿透 python 等脚本形式）。
+                    // 三种路径：判定开启且成功→按意图路由；开启但不可用→保守兑底；
+                    // 主动关闭→关键词启发式（删除类受 delete 门禁，其余直接放行）。
+                    let intent_cfg = gate_inner.config.get().await.intent.clone();
+                    if intent_cfg.enabled {
+                        match judge.classify(&command).await {
                         Ok(verdict) => {
                             audit_inner.log(
                                 "gate_decision",
@@ -396,7 +400,7 @@ fn execute_tool(deps: &SystemToolDeps) -> Arc<dyn Tool> {
                             }
                         }
                         Err(e) => {
-                            // 判定不可用（未配置模型/调用失败）：保守处理。
+                            // 判定开启但不可用（未配置模型/调用失败/超时）：保守处理。
                             audit_inner.log(
                                 "gate_decision",
                                 "intent_judge",
@@ -430,6 +434,27 @@ fn execute_tool(deps: &SystemToolDeps) -> Arc<dyn Tool> {
                                 if !approved {
                                     return Ok(json!({ "error": "操作被拒绝：用户未批准该命令", "denied": true }));
                                 }
+                            }
+                        }
+                    }
+                    } else {
+                        // 意图判定已在 [intent] 中主动关闭：回退关键词启发式，
+                        // 删除类命令仍受 delete 门禁（开关+审批策略），其余命令直接放行。
+                        audit_inner.log(
+                            "gate_decision",
+                            "intent_judge",
+                            &command,
+                            "意图判定已关闭，使用关键词启发式",
+                            "ok",
+                            "",
+                            0,
+                        );
+                        if command_contains_delete(&command) {
+                            if let Err(e2) = gate_inner
+                                .authorize("delete", "sys_execute", &format!("命令含删除操作: {command}"), &args_for_gate, "")
+                                .await
+                            {
+                                return Ok(json!({ "error": e2.message(), "denied": true }));
                             }
                         }
                     }

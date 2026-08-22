@@ -140,15 +140,47 @@ main { flex: 1; overflow: hidden; display: flex; }
 
 /* ---------- 输入区 ---------- */
 .composer {
-  display: flex; gap: 10px; padding: 14px 8%; border-top: 1px solid var(--border);
-  background: var(--bg-soft); align-items: flex-end;
+  display: flex; flex-direction: column; gap: 8px;
+  padding: 12px 8%; border-top: 1px solid var(--border);
+  background: var(--bg-soft); position: relative;
 }
+.composer.dragover { outline: 2px dashed var(--accent); outline-offset: -6px; }
+.composer-row { display: flex; gap: 10px; align-items: flex-end; }
 .composer textarea {
   flex: 1; resize: none; background: var(--bg-card); border: 1px solid var(--border);
   border-radius: var(--radius); color: var(--text); padding: 10px 14px; font-size: 14px;
   font-family: inherit; outline: none; max-height: 180px;
 }
 .composer textarea:focus { border-color: var(--accent); }
+.icon-btn { padding: 9px 12px; font-size: 16px; line-height: 1; }
+
+.attachments { display: flex; flex-wrap: wrap; gap: 6px; }
+.attach-chip {
+  display: inline-flex; align-items: center; gap: 6px;
+  background: var(--bg-card); border: 1px solid var(--border);
+  border-radius: 16px; padding: 3px 6px 3px 10px; font-size: 12px;
+}
+.attach-chip button {
+  background: none; border: none; color: var(--text-dim); cursor: pointer;
+  font-size: 14px; padding: 0 4px;
+}
+.attach-chip button:hover { color: var(--red); }
+
+.skill-popup {
+  position: absolute; bottom: 100%; left: 8%; right: 8%; margin-bottom: 6px;
+  background: var(--bg-card); border: 1px solid var(--border);
+  border-radius: var(--radius); max-height: 240px; overflow-y: auto;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45); z-index: 20;
+}
+.skill-popup .sp-title {
+  padding: 8px 12px; font-size: 12px; color: var(--text-dim);
+  border-bottom: 1px solid var(--border);
+}
+.skill-popup .sp-item {
+  padding: 8px 12px; cursor: pointer; display: flex; flex-direction: column; gap: 2px;
+}
+.skill-popup .sp-item:hover { background: var(--accent-soft); }
+.skill-popup .sp-item .muted { font-size: 11.5px; }
 
 .btn {
   border: none; border-radius: 8px; padding: 9px 18px; cursor: pointer;

@@ -44,9 +44,15 @@
           </div>
         </div>
         <div class="approvals" id="approvals"></div>
-        <div class="composer">
-          <textarea id="chat-input" data-i18n-ph="input_placeholder" placeholder="输入指令，Enter 发送，Shift+Enter 换行" rows="2"></textarea>
-          <button class="btn primary" id="btn-send" data-i18n="send">发送</button>
+        <div class="composer" id="composer">
+          <div id="skill-popup" class="skill-popup hidden"></div>
+          <div id="attachments" class="attachments hidden"></div>
+          <div class="composer-row">
+            <button class="btn ghost icon-btn" id="btn-attach" data-i18n-title="attach_title" title="附加文件">📎</button>
+            <textarea id="chat-input" data-i18n-ph="input_placeholder" placeholder="输入指令，Enter 发送，Shift+Enter 换行，/skill 选择技能，可拖放文件" rows="2"></textarea>
+            <button class="btn primary" id="btn-send" data-i18n="send">发送</button>
+          </div>
+          <input type="file" id="file-input" multiple class="hidden">
         </div>
       </div>
       <aside class="chat-side">
